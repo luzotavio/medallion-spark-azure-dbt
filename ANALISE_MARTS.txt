@@ -1,0 +1,111 @@
+===============================================================================
+              ANÁLISE DETALHADA DO FLUXO DE DADOS E TRANSFORMAÇÕES (MARTS)
+===============================================================================
+Projeto: medallion_dbt_spark
+Arquitetura: Medallion (Bronze -> Silver -> Gold)
+Data da Análise: 15 de Abril de 2026
+-------------------------------------------------------------------------------
+
+1. VISÃO GERAL DA ARQUITETURA
+-----------------------------
+O projeto utiliza a arquitetura Medallion para organizar o processamento de dados 
+em camadas de refinamento crescente:
+
+- BRONZE: Dados brutos ingeridos diretamente da fonte (AdventureWorks LT).
+- SILVER: Implementada via dbt snapshots, aplicando lógica de Slowing Changing 
+  Dimensions (SCD Tipo 2) para histórico de alterações. Armazenada em Delta 
+  no Azure Data Lake (abfss://silver...).
+- GOLD (MARTS): Camada final de consumo, onde os dados são modelados em tabelas 
+  de Dimensão e Fato para análise de negócio. Armazenada em Delta no 
+  Azure Data Lake (abfss://gold...).
+
+2. FLUXO DE DADOS (LINEAGE)
+---------------------------
+O fluxo geral segue este padrão:
+[Source: saleslt] -> [Snapshots (Silver)] -> [Models: Marts (Gold)]
+
+3. ANÁLISE DETALHADA DOS MODELOS (CAMADA GOLD)
+----------------------------------------------
+
+A) MODELO: dim_customer
+-----------------------
+- Localização: models/marts/customer/dim_customer.sql
+- Propósito: Centralizar informações de clientes e seus endereços principais.
+- Fontes Utilizadas:
+    * address_snapshot (Silver)
+    * customeraddress_snapshot (Silver)
+    * customer_snapshot (Silver)
+- Transformações Realizadas:
+    1. Filtragem de Snapshots: Aplica `where dbt_valid_to is null` em todas as 
+       fontes Silver para garantir que apenas os registros ativos (atuais) sejam 
+       processados.
+    2. Concatenação de Nomes: Cria o campo `FullName` unindo FirstName, 
+       MiddleName e LastName, tratando valores nulos com `ifnull`.
+    3. Junções (Joins): Realiza Inner Joins entre Cliente -> Endereço_Cliente -> Endereço.
+    4. Chave Substituta (Surrogate Key): Gera `customer_sk` utilizando a função 
+       `row_number() over (order by customerid)`, garantindo uma chave única 
+       para a camada Gold.
+- Armazenamento: Formato Delta em `abfss://gold@medallionlo.dfs.core.windows.net/customers`.
+
+B) MODELO: dim_product
+----------------------
+- Localização: models/marts/product/dim_product.sql
+- Propósito: Tabela de dimensão para produtos e seus modelos.
+- Fontes Utilizadas:
+    * product_snapshot (Silver)
+    * productmodel_snapshot (Silver)
+- Transformações Realizadas:
+    1. Filtragem de Snapshots: Seleção de registros ativos (`dbt_valid_to is null`).
+    2. Junção (Join): Left Join entre o produto e seu modelo correspondente 
+       (`productmodelid`).
+    3. Chave Substituta (Surrogate Key): Gera `product_sk` via `row_number()`.
+    4. Seleção de Atributos: Limpeza e renomeação de campos para nomes amigáveis 
+       ao negócio (ex: product_name, model, description).
+- Armazenamento: Formato Delta em `abfss://gold@medallionlo.dfs.core.windows.net/products`.
+
+C) MODELO: sales (Fato)
+-----------------------
+- Localização: models/marts/sales/sales.sql
+- Propósito: Consolidar as transações de vendas (cabeçalho e detalhe) para análise.
+- Fontes Utilizadas:
+    * salesorderdetail_snapshot (Silver)
+    * source('saleslt', 'product') (Bronze)
+    * source('saleslt', 'salesorderheader') (Bronze)
+- Transformações Realizadas:
+    1. Desnormalização: Une os detalhes do pedido (`salesorderdetail`) com o 
+       cabeçalho (`salesorderheader`) e dados complementares de produto.
+    2. Enriquecimento: Traz informações de preços, descontos, quantidades, 
+       status do pedido e datas de entrega em uma única visão tabular.
+- Armazenamento: Formato Delta em `abfss://gold@medallionlo.dfs.core.windows.net/sales`.
+
+4. OBSERVAÇÕES TÉCNICAS E PONTOS DE ATENÇÃO
+-------------------------------------------
+
+I. DISCREPÂNCIA DE NOMENCLATURA:
+   Foi detectado que o nome definido nos arquivos .yml não condiz exatamente 
+   com o nome dos arquivos .sql em alguns casos:
+   - Arquivo: dim_customer.sql   | .yml: dim_customers
+   - Arquivo: dim_product.sql    | .yml: dim_products
+   - Arquivo: sales.sql          | .yml: dim_sales
+   *Recomendação:* Padronizar os nomes nos arquivos .yml para evitar confusão 
+   na execução de testes e documentação do dbt.
+
+II. CONSISTÊNCIA DE FONTES NO MODELO SALES:
+    Diferente das dimensões, o modelo `sales.sql` consome algumas tabelas 
+    diretamente da fonte `saleslt` (Bronze) em vez de usar os snapshots 
+    correspondentes, embora existam snapshots criados para `salesorderheader`.
+
+III. ESTRATÉGIA DE MATERIALIZAÇÃO:
+    Todos os modelos Gold estão configurados como `table` com formato `delta`, 
+    otimizados para performance no ecossistema Spark/Databricks.
+
+5. TESTES E QUALIDADE
+---------------------
+Os arquivos .yml definem testes essenciais:
+- Unique e Not Null: Aplicados nas Surrogate Keys (`customer_sk`, `product_sk`).
+- Not Null: Aplicado em chaves naturais (IDs de fonte) e campos críticos como 
+  datas de venda e preços.
+
+===============================================================================
+FIM DO DOCUMENTO
+===============================================================================
