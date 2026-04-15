@@ -70,11 +70,4 @@ A camada Gold transforma os dados da Silver em modelos dimensionais prontos para
 
 ---
 
-## 🚀 Como o Pipeline Funciona
 
-1.  O **ADF** inicia o pipeline, lê as tabelas do **SQL Database** e salva no **Bronze**.
-2.  O **Databricks** (via dbt) lê os dados do **Bronze**, aplica a lógica de snapshots e salva no **Silver** como Delta.
-3.  O **dbt** processa os dados do **Silver**, cria as tabelas dimensionais e salva no **Gold**.
-
----
-*Documentação consolidada a partir das análises de infraestrutura Azure, snapshots e modelos de marts.*
